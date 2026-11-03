@@ -1,0 +1,19 @@
+name: grid-bench
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --release
+      - name: Run
+        run: ./target/release/gridbench
+      - name: Machine
+        run: |
+          nproc
+          grep -E "model name" /proc/cpuinfo | head -1 || true
