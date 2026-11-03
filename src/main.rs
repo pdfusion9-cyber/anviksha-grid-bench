@@ -1,117 +1,192 @@
-//! How fast is a 24^3 lookup grid when the surrounding loop is also native?
+//! Lookup grids measured inside a native Rust loop, which is where they would
+//! actually live if the model core is Rust and Python is only a wrapper.
 //!
-//! The Python measurements were: 1,660 ns for a per-query loop, 9.7 ns for a
-//! vectorised gather, 57 ns to just compute the value. The first number is not
-//! the grid -- it is the interpreter. This measures the same grid with no
-//! interpreter in the way, so the grid's real cost can be seen.
+//! With no interpreter and no FFI boundary in the way, a lookup costs what the
+//! hardware charges: a cache read. This measures three things that a Rust model
+//! could plausibly use, against computing the same values inline:
 //!
-//! Three things are timed:
-//!   build    fill 24^3 = 13,824 cells
-//!   lookup   read one cell per query, in a tight native loop
-//!   compute  calculate the value instead of reading it
+//!   lut1   a 1D table for an activation (tanh, sigmoid, gelu). This is the one
+//!          a transformer actually needs, because activations take one input.
+//!   grid3  a 24^3 table for a three-input function. Real, but only for the
+//!          parts of a model that genuinely take three bounded inputs.
+//!   direct computing the value instead, in the same loop
+//!
+//! Sizes are swept because the whole result depends on whether the table stays
+//! in L1. A table that does not fit is a memory round trip, and a memory round
+//! trip is slower than arithmetic.
 
 use std::time::Instant;
 
-const N: usize = 24;
-const LO: f32 = -8.0;
-const HI: f32 = 8.0;
-const SCALE: f32 = 40.0; // values land in [-3, 3], so int8 has room
+const Q: usize = 20_000_000;
 
 #[inline(always)]
-fn index(x: usize, y: usize, z: usize) -> usize {
-    (x * N + y) * N + z
+fn xorshift(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+fn gelu(x: f32) -> f32 {
+    // tanh approximation, the one most implementations use
+    0.5 * x * (1.0 + (0.7978845608 * (x + 0.044715 * x * x * x)).tanh())
+}
+
+struct Lut1 {
+    table: Vec<f32>,
+    lo: f32,
+    scale: f32,
+}
+
+impl Lut1 {
+    fn build(f: fn(f32) -> f32, lo: f32, hi: f32, n: usize) -> Self {
+        let mut table = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = lo + (hi - lo) * i as f32 / (n - 1) as f32;
+            table.push(f(x));
+        }
+        Lut1 { table, lo, scale: (n - 1) as f32 / (hi - lo) }
+    }
+
+    #[inline(always)]
+    fn get(&self, x: f32) -> f32 {
+        let idx = ((x - self.lo) * self.scale) as usize;
+        // clamp instead of branching out of bounds; the table covers [-8, 8]
+        let idx = idx.min(self.table.len() - 1);
+        self.table[idx]
+    }
+}
+
+struct Grid3 {
+    cells: Vec<f32>,
+    lo: f32,
+    scale: f32,
+    n: usize,
+}
+
+impl Grid3 {
+    fn build(lo: f32, hi: f32, n: usize) -> Self {
+        let mut axis = vec![0f32; n];
+        for i in 0..n {
+            axis[i] = (lo + (hi - lo) * i as f32 / (n - 1) as f32).tanh();
+        }
+        let mut cells = vec![0f32; n * n * n];
+        for x in 0..n {
+            for y in 0..n {
+                for z in 0..n {
+                    cells[(x * n + y) * n + z] = axis[x] + axis[y] + axis[z];
+                }
+            }
+        }
+        Grid3 { cells, lo, scale: (n - 1) as f32 / (hi - lo), n }
+    }
+
+    #[inline(always)]
+    fn get(&self, x: f32, y: f32, z: f32) -> f32 {
+        let ix = (((x - self.lo) * self.scale) as usize).min(self.n - 1);
+        let iy = (((y - self.lo) * self.scale) as usize).min(self.n - 1);
+        let iz = (((z - self.lo) * self.scale) as usize).min(self.n - 1);
+        self.cells[(ix * self.n + iy) * self.n + iz]
+    }
 }
 
 fn main() {
-    let mut axis = [0f32; N];
-    for i in 0..N {
-        axis[i] = LO + (HI - LO) * i as f32 / (N - 1) as f32;
+    let mut seed: u64 = 0x2545F4914F6CDD1D;
+    let mut xs = vec![0f32; Q];
+    for x in xs.iter_mut() {
+        let r = xorshift(&mut seed);
+        // uniform in [-8, 8]
+        *x = ((r >> 11) as f32 / (1u64 << 53) as f32) * 16.0 - 8.0;
     }
 
-    // ---- build ----------------------------------------------------------
+    println!("{:>10} {:>10} {:>12} {:>12} {:>10}", "table", "KB", "direct ns", "lookup ns", "speedup");
+
+    // ---- 1D activation tables -------------------------------------------
     let t0 = Instant::now();
-    let mut grid = vec![0i8; N * N * N];
-    let mut tanh_axis = [0f32; N];
-    for i in 0..N {
-        tanh_axis[i] = axis[i].tanh();
+    let mut sink = 0f32;
+    for &x in &xs {
+        sink += x.tanh();
     }
-    for x in 0..N {
-        for y in 0..N {
-            for z in 0..N {
-                let v = tanh_axis[x] + tanh_axis[y] + tanh_axis[z];
-                grid[index(x, y, z)] = (v * SCALE) as i8;
-            }
+    let tanh_direct = t0.elapsed().as_secs_f64() / Q as f64 * 1e9;
+    println!("{:>10} {:>10} {:>12.2} {:>12} {:>10}", "tanh inline", "-", tanh_direct, "-", "-");
+
+    for n in (256usize, 4_096, 65_536, 1_048_576) {
+        let lut = Lut1::build(f32::tanh, -8.0, 8.0, n);
+        let t0 = Instant::now();
+        let mut s = 0f32;
+        for &x in &xs {
+            s += lut.get(x);
         }
+        let ns = t0.elapsed().as_secs_f64() / Q as f64 * 1e9;
+        println!("{:>10} {:>10} {:>12.2} {:>12.2} {:>9.2}x",
+            format!("tanh lut{n}"), n * 4 / 1024, tanh_direct, ns, tanh_direct / ns);
+        sink += s;
     }
-    let build = t0.elapsed();
-    println!(
-        "grid {}^3 = {} cells = {} KB",
-        N,
-        N * N * N,
-        grid.len() / 1024
-    );
-    println!("build   {:>10.3} ms   ({:.1} M cells/s)",
-        build.as_secs_f64() * 1e3,
-        (N * N * N) as f64 / build.as_secs_f64() / 1e6);
-
-    // ---- queries --------------------------------------------------------
-    const Q: usize = 10_000_000;
-    let mut qx = vec![0u8; Q];
-    let mut qy = vec![0u8; Q];
-    let mut qz = vec![0u8; Q];
-    let mut seed: u64 = 0x9E3779B97F4A7C15;
-    let mut next = || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed
-    };
-    for i in 0..Q {
-        qx[i] = (next() % N as u64) as u8;
-        qy[i] = (next() % N as u64) as u8;
-        qz[i] = (next() % N as u64) as u8;
-    }
-
-    let mut sink: i64 = 0;
 
     let t0 = Instant::now();
-    for i in 0..Q {
-        sink += grid[index(qx[i] as usize, qy[i] as usize, qz[i] as usize)] as i64;
+    for &x in &xs {
+        sink += sigmoid(x);
     }
-    let lookup = t0.elapsed();
-    let lookup_ns = lookup.as_secs_f64() / Q as f64 * 1e9;
-    println!("lookup  {:>10.2} ns/query   ({:.1} M queries/s)",
-        lookup_ns, Q as f64 / lookup.as_secs_f64() / 1e6);
+    let sig_direct = t0.elapsed().as_secs_f64() / Q as f64 * 1e9;
+    let lut = Lut1::build(sigmoid, -8.0, 8.0, 4_096);
+    let t0 = Instant::now();
+    for &x in &xs {
+        sink += lut.get(x);
+    }
+    let sig_lut = t0.elapsed().as_secs_f64() / Q as f64 * 1e9;
+    println!("{:>10} {:>10} {:>12.2} {:>12.2} {:>9.2}x",
+        "sigmoid lut", 4096 * 4 / 1024, sig_direct, sig_lut, sig_direct / sig_lut);
 
     let t0 = Instant::now();
-    for i in 0..Q {
-        let v = axis[qx[i] as usize].tanh()
-            + axis[qy[i] as usize].tanh()
-            + axis[qz[i] as usize].tanh();
-        sink += (v * SCALE) as i64;
+    for &x in &xs {
+        sink += gelu(x);
     }
-    let compute = t0.elapsed();
-    let compute_ns = compute.as_secs_f64() / Q as f64 * 1e9;
-    println!("compute {:>10.2} ns/query   ({:.1} M queries/s)",
-        compute_ns, Q as f64 / compute.as_secs_f64() / 1e6);
-
-    println!("\nlookup vs compute: {:.2}x faster", compute_ns / lookup_ns);
-    println!("checksum {}", sink);
-
-    // what the same grid costs when the whole batch is processed natively
+    let gelu_direct = t0.elapsed().as_secs_f64() / Q as f64 * 1e9;
+    let lut = Lut1::build(gelu, -8.0, 8.0, 4_096);
     let t0 = Instant::now();
-    let mut total: i64 = 0;
-    for chunk in 0..Q / 64 {
-        let mut acc: i64 = 0;
-        for i in chunk * 64..(chunk + 1) * 64 {
-            acc += grid[index(qx[i] as usize, qy[i] as usize, qz[i] as usize)] as i64;
+    for &x in &xs {
+        sink += lut.get(x);
+    }
+    let gelu_lut = t0.elapsed().as_secs_f64() / Q as f64 * 1e9;
+    println!("{:>10} {:>10} {:>12.2} {:>12.2} {:>9.2x}",
+        "gelu lut", 4096 * 4 / 1024, gelu_direct, gelu_lut, gelu_direct / gelu_lut);
+
+    // ---- 3D grid ---------------------------------------------------------
+    println!();
+    for n in (16usize, 24, 32, 64) {
+        let g = Grid3::build(-8.0, 8.0, n);
+        let t0 = Instant::now();
+        let mut s = 0f32;
+        let mut sd: u64 = 1;
+        for _ in 0..Q {
+            let a = (xorshift(&mut sd) >> 11) as f32 / (1u64 << 53) as f32 * 16.0 - 8.0;
+            let b = (xorshift(&mut sd) >> 11) as f32 / (1u64 << 53) as f32 * 16.0 - 8.0;
+            let c = (xorshift(&mut sd) >> 11) as f32 / (1u64 << 53) as f32 * 16.0 - 8.0;
+            s += g.get(a, b, c);
         }
-        total += acc;
+        let grid_ns = t0.elapsed().as_secs_f64() / Q as f64 * 1e9;
+
+        let t0 = Instant::now();
+        let mut sd2: u64 = 1;
+        for _ in 0..Q {
+            let a = (xorshift(&mut sd2) >> 11) as f32 / (1u64 << 53) as f32 * 16.0 - 8.0;
+            let b = (xorshift(&mut sd2) >> 11) as f32 / (1u64 << 53) as f32 * 16.0 - 8.0;
+            let c = (xorshift(&mut sd2) >> 11) as f32 / (1u64 << 53) as f32 * 16.0 - 8.0;
+            s += a.tanh() + b.tanh() + c.tanh();
+        }
+        let direct_ns = t0.elapsed().as_secs_f64() / Q as f64 * 1e9;
+        println!("{:>10} {:>10} {:>12.2} {:>12.2} {:>9.2}x",
+            format!("grid{}^3", n), n * n * n * 4 / 1024, direct_ns, grid_ns, direct_ns / grid_ns);
+        sink += s;
     }
-    let blocked = t0.elapsed();
-    println!(
-        "lookup in 64-query blocks: {:.2} ns/query  (checksum {})",
-        blocked.as_secs_f64() / Q as f64 * 1e9,
-        total
-    );
+
+    println!("\nchecksum {}", sink);
+    println!("\nreading: a table that stays in L1 wins; one that spills to RAM does");
+    println!("not. The crossover is the L1/L2 size, not the algorithm.");
 }
