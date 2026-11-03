@@ -116,7 +116,7 @@ fn main() {
     let tanh_direct = t0.elapsed().as_secs_f64() / Q as f64 * 1e9;
     println!("{:>10} {:>10} {:>12.2} {:>12} {:>10}", "tanh inline", "-", tanh_direct, "-", "-");
 
-    for n in (256usize, 4_096, 65_536, 1_048_576) {
+    for n in [256usize, 4_096, 65_536, 1_048_576] {
         let lut = Lut1::build(f32::tanh, -8.0, 8.0, n);
         let t0 = Instant::now();
         let mut s = 0f32;
@@ -154,12 +154,12 @@ fn main() {
         sink += lut.get(x);
     }
     let gelu_lut = t0.elapsed().as_secs_f64() / Q as f64 * 1e9;
-    println!("{:>10} {:>10} {:>12.2} {:>12.2} {:>9.2x}",
+    println!("{:>10} {:>10} {:>12.2} {:>12.2} {:>9.2}x",
         "gelu lut", 4096 * 4 / 1024, gelu_direct, gelu_lut, gelu_direct / gelu_lut);
 
     // ---- 3D grid ---------------------------------------------------------
     println!();
-    for n in (16usize, 24, 32, 64) {
+    for n in [16usize, 24, 32, 64] {
         let g = Grid3::build(-8.0, 8.0, n);
         let t0 = Instant::now();
         let mut s = 0f32;
