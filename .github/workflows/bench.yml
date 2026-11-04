@@ -16,6 +16,8 @@ jobs:
         run: ./target/release/gridbench
       - name: Hindi grammar tables
         run: ./target/release/grammar_grid
+      - name: Arithmetic recall vs computation
+        run: ./target/release/arith_grid
       - name: Machine
         run: |
           nproc
