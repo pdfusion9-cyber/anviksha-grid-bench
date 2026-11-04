@@ -18,6 +18,8 @@ jobs:
         run: ./target/release/grammar_grid
       - name: Arithmetic recall vs computation
         run: ./target/release/arith_grid
+      - name: All four operations and table width
+        run: ./target/release/fast_arith
       - name: Machine
         run: |
           nproc

@@ -8,6 +8,10 @@ name = "gridbench"
 path = "src/main.rs"
 
 [[bin]]
+name = "fast_arith"
+path = "src/fast_arith.rs"
+
+[[bin]]
 name = "arith_grid"
 path = "src/arith_grid.rs"
 
