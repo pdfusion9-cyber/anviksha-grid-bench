@@ -6,13 +6,16 @@ on:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --release
-      - name: Run
+      - name: Lookup grids and activation tables
         run: ./target/release/gridbench
+      - name: Hindi grammar tables
+        run: ./target/release/grammar_grid
       - name: Machine
         run: |
           nproc

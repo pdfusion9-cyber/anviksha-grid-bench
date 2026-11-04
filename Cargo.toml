@@ -7,6 +7,10 @@ edition = "2021"
 name = "gridbench"
 path = "src/main.rs"
 
+[[bin]]
+name = "grammar_grid"
+path = "src/grammar_grid.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
