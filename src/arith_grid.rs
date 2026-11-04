@@ -126,45 +126,64 @@ fn main() {
     const ITERS: usize = 20_000_000;
     let mut sink = 0i64;
 
+    // The first version of this benchmark was wrong and reported division as
+    // 0.94 ns/op, which is impossible: integer division costs tens of cycles.
+    // The cause was the operands -- a = b * ((i/13) % N) let the compiler see
+    // that a/b was just (i/13) % N and delete the division. black_box hides the
+    // operands so the work actually happens.
+    use std::hint::black_box;
+
+    let pairs: Vec<(usize, usize)> = (0..ITERS)
+        .map(|i| {
+            let b = 1 + ((i * 7919) % (N - 1));
+            let a = ((i * 104729) % N) * b;      // always exactly divisible
+            (a, b)
+        })
+        .collect();
+
     // multiplication: recall vs compute
     let t0 = Instant::now();
-    for i in 0..ITERS {
-        let a = i % N; let b = (i / 7) % N;
-        sink += t.mul_recall(a, b).unwrap() as i64;
+    for &(a, b) in pairs.iter() {
+        let a = black_box(a % N);
+        let b = black_box(b % N);
+        sink += black_box(t.mul_recall(a, b)).unwrap() as i64;
     }
     let mul_table = t0.elapsed().as_nanos() as f64 / ITERS as f64;
 
     let t0 = Instant::now();
-    for i in 0..ITERS {
-        let a = i % N; let b = (i / 7) % N;
-        sink += (a * b) as i64;
+    for &(a, b) in pairs.iter() {
+        let a = black_box(a % N);
+        let b = black_box(b % N);
+        sink += black_box((a as i64) * (b as i64));
     }
     let mul_cpu = t0.elapsed().as_nanos() as f64 / ITERS as f64;
 
-    // division: recall vs compute
+    // division: recall vs compute, both on operands the compiler cannot simplify
     let t0 = Instant::now();
-    for i in 0..ITERS {
-        let b = 1 + (i % (N - 1));
-        let a = b * ((i / 13) % N);
-        if let Some(q) = t.div_recall(a, b) { sink += q as i64; }
+    for &(a, b) in pairs.iter() {
+        let a = black_box(a);
+        let b = black_box(b);
+        if let Some(q) = t.div_recall(a, b) {
+            sink += black_box(q) as i64;
+        }
     }
     let div_table = t0.elapsed().as_nanos() as f64 / ITERS as f64;
 
     let t0 = Instant::now();
-    for i in 0..ITERS {
-        let b = 1 + (i % (N - 1));
-        let a = b * ((i / 13) % N);
-        sink += (a / b) as i64;
+    for &(a, b) in pairs.iter() {
+        let a = black_box(a) as i64;
+        let b = black_box(b) as i64;
+        sink += black_box(a / b);
     }
     let div_cpu = t0.elapsed().as_nanos() as f64 / ITERS as f64;
 
-    println!("{:<34} {:>10} ns/op", "multiplication, from the table", mul_table);
-    println!("{:<34} {:>10} ns/op", "multiplication, on the CPU", mul_cpu);
-    println!("{:<34} {:>10}x", "  table speedup", mul_cpu / mul_table);
+    println!("{:<34} {:>10.3} ns/op", "multiplication, from the table", mul_table);
+    println!("{:<34} {:>10.3} ns/op", "multiplication, on the CPU", mul_cpu);
+    println!("{:<34} {:>10.2}x", "  table speedup", mul_cpu / mul_table);
     println!();
-    println!("{:<34} {:>10} ns/op", "division, from the table", div_table);
-    println!("{:<34} {:>10} ns/op", "division, on the CPU", div_cpu);
-    println!("{:<34} {:>10}x", "  table speedup", div_cpu / div_table);
+    println!("{:<34} {:>10.3} ns/op", "division, from the table", div_table);
+    println!("{:<34} {:>10.3} ns/op", "division, on the CPU", div_cpu);
+    println!("{:<34} {:>10.2}x", "  table speedup", div_cpu / div_table);
     println!("checksum {sink}");
 
     println!("\nreading: this is the difference the grammar test missed. Grammar was");
