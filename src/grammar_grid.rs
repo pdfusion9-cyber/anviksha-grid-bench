@@ -90,9 +90,23 @@ static POSTPOSITION: [&str; GENDERS * NUMBERS * CASES] = [
     "की", "की", "को", "की", "की", "को",
 ];
 
+/// The tables below are written grouped by the last axis -- all past forms, then
+/// all present, then all future -- because that is how they are readable. The
+/// index has to match that layout, not an imagined one. Getting this wrong is
+/// what the disagreement counter caught: 19 of 30 answers were wrong before.
 #[inline]
-fn idx3(a: usize, b: usize, c: usize, nb: usize, nc: usize) -> usize {
-    a * nb * nc + b * nc + c
+fn conj_idx(p: usize, n: usize, t: usize) -> usize {
+    t * (PERSONS * NUMBERS) + p * NUMBERS + n
+}
+
+#[inline]
+fn copula_idx(p: usize, n: usize, hon: usize) -> usize {
+    hon * (PERSONS * NUMBERS) + p * NUMBERS + n
+}
+
+#[inline]
+fn post_idx(g: usize, n: usize, c: usize) -> usize {
+    g * (NUMBERS * CASES) + n * CASES + c
 }
 
 /// Precomputed grammar, built once and then read.
@@ -116,17 +130,17 @@ impl GrammarTables {
 
     #[inline]
     pub fn conjugate(&self, p: Person, n: Number, t: Tense) -> &'static str {
-        self.conjugation[idx3(p as usize, n as usize, t as usize, NUMBERS, TENSES)]
+        self.conjugation[conj_idx(p as usize, n as usize, t as usize)]
     }
 
     #[inline]
     pub fn copula(&self, p: Person, n: Number, honorific: bool) -> &'static str {
-        self.copula[idx3(p as usize, n as usize, honorific as usize, NUMBERS, HONORIFICS)]
+        self.copula[copula_idx(p as usize, n as usize, honorific as usize)]
     }
 
     #[inline]
     pub fn postposition(&self, g: usize, n: Number, c: usize) -> &'static str {
-        self.postposition[idx3(g, n as usize, c, NUMBERS, CASES)]
+        self.postposition[post_idx(g, n as usize, c)]
     }
 
     /// Useful entries against the cells a 24^3 grid would have.
